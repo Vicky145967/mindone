@@ -200,6 +200,14 @@ from .models.mixtral import (
     MixtralModel,
     MixtralPreTrainedModel,
 )
+from .models.mbart import (
+    MBartForCausalLM,
+    MBartForConditionalGeneration,
+    MBartForQuestionAnswering,
+    MBartForSequenceClassification,
+    MBartModel,
+    MBartPreTrainedModel,
+)
 from .models.mobilebert import (
     MobileBertForMaskedLM,
     MobileBertForMultipleChoice,

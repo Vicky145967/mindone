@@ -36,8 +36,6 @@ from mindspore import mint, nn, ops
 from mindspore.common.initializer import Normal, initializer
 from mindspore.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
-# import torch.utils.checkpoint
-
 from ...activations import ACT2FN
 from ...generation import GenerationMixin
 from ...modeling_attn_mask_utils import (
@@ -105,28 +103,28 @@ class MBartLearnedPositionalEmbedding(mint.nn.Embedding):
         self.offset = 2
         super().__init__(num_embeddings + self.offset, embedding_dim)
 
-    def forward(self, input_ids: ms.Tensor, past_key_values_length: int = 0):
+    def construct(self, input_ids: ms.Tensor, past_key_values_length: int = 0):
         """`input_ids' shape is expected to be [bsz x seqlen]."""
 
         bsz, seq_len = input_ids.shape[:2]
         positions = mint.arange(past_key_values_length, past_key_values_length + seq_len, dtype=ms.int32)
         positions = mint.broadcast_to(positions, (bsz, seq_len))
 
-        return super().forward(positions + self.offset)
+        return super().construct(positions + self.offset)
 
 
 # Copied from transformers.models.bart.modeling_bart.BartScaledWordEmbedding with Bart->MBart
 class MBartScaledWordEmbedding(mint.nn.Embedding):
     """
-    This module overrides nn.Embeddings' forward by multiplying with embeddings scale.
+    This module overrides nn.Embeddings' construct by multiplying with embeddings scale.
     """
 
     def __init__(self, num_embeddings: int, embedding_dim: int, padding_idx: int, embed_scale: Optional[float] = 1.0):
         super().__init__(num_embeddings, embedding_dim, padding_idx)
         self.embed_scale = embed_scale
 
-    def forward(self, input_ids: ms.Tensor):
-        return super().forward(input_ids) * self.embed_scale
+    def construct(self, input_ids: ms.Tensor):
+        return super().construct(input_ids) * self.embed_scale
 
 
 # Copied from transformers.models.bart.modeling_bart.BartAttention with Bart->MBart
@@ -167,7 +165,7 @@ class MBartAttention(nn.Cell):
     def _shape(self, tensor: ms.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
-    def forward(
+    def construct(
         self,
         hidden_states: ms.Tensor,
         key_value_states: Optional[ms.Tensor] = None,
@@ -293,7 +291,7 @@ class MBartAttention(nn.Cell):
 class MBartFlashAttention2(MBartAttention):
     """
     MBart flash attention module. This module inherits from `MBartAttention` as the weights of the module stays
-    untouched. The only required change would be on the forward pass where it needs to correctly call the public API of
+    untouched. The only required change would be on the construct pass where it needs to correctly call the public API of
     flash attention and deal with padding tokens in case the input contains any of them.
     """
 
@@ -330,7 +328,7 @@ class MBartFlashAttention2(MBartAttention):
     def _reshape(self, tensor: ms.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
 
-    def forward(
+    def construct(
         self,
         hidden_states: ms.Tensor,
         key_value_states: Optional[ms.Tensor] = None,
@@ -438,7 +436,7 @@ class MBartFlashAttention2(MBartAttention):
 
 # Copied from transformers.models.bart.modeling_bart.BartSdpaAttention with Bart->MBart
 class MBartSdpaAttention(MBartAttention):
-    def forward(
+    def construct(
         self,
         hidden_states: ms.Tensor,
         key_value_states: Optional[ms.Tensor] = None,
@@ -454,7 +452,7 @@ class MBartSdpaAttention(MBartAttention):
                 "MBartModel is using MBartSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True` or `layer_head_mask` not None. Falling back to the manual attention"
                 ' implementation, but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
             )
-            return super().forward(
+            return super().construct(
                 hidden_states,
                 key_value_states=key_value_states,
                 past_key_value=past_key_value,
@@ -544,7 +542,7 @@ MBART_ATTENTION_CLASSES = {
 }
 
 
-class MBartEncoderLayer(nn.Module):
+class MBartEncoderLayer(nn.Cell):
     def __init__(self, config: MBartConfig):
         super().__init__()
         self.embed_dim = config.d_model
@@ -563,7 +561,7 @@ class MBartEncoderLayer(nn.Module):
         self.fc2 = mint.nn.Linear(config.encoder_ffn_dim, self.embed_dim)
         self.final_layer_norm = mint.nn.LayerNorm(self.embed_dim)
 
-    def forward(
+    def construct(
         self,
         hidden_states: ms.Tensor,
         attention_mask: ms.Tensor,
@@ -642,7 +640,7 @@ class MBartDecoderLayer(nn.Cell):
         self.fc2 = mint.nn.Linear(config.decoder_ffn_dim, self.embed_dim)
         self.final_layer_norm = mint.nn.LayerNorm(self.embed_dim)
 
-    def forward(
+    def construct(
         self,
         hidden_states: ms.Tensor,
         attention_mask: Optional[ms.Tensor] = None,
@@ -748,7 +746,7 @@ class MBartClassificationHead(nn.Cell):
         self.dropout = nn.Dropout(p=pooler_dropout)
         self.out_proj = mint.nn.Linear(inner_dim, num_classes)
 
-    def forward(self, hidden_states: ms.Tensor) -> ms.Tensor:
+    def construct(self, hidden_states: ms.Tensor) -> ms.Tensor:
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.dense(hidden_states)
         hidden_states = mint.tanh(hidden_states)
@@ -768,15 +766,11 @@ class MBartPreTrainedModel(PreTrainedModel):
     def _init_weights(self, module):
         std = self.config.init_std
         if isinstance(module, mint.nn.Linear):
-            module.weight.data.normal_(
-                initializer(Normal(sigma=std, mean=0.0), module.weight.shape, module.weight.dtype)
-            )
+            module.weight.set_data(initializer(Normal(sigma=std, mean=0.0), module.weight.shape, module.weight.dtype))
             if module.bias is not None:
                 module.bias.set_data(initializer("zeros", module.bias.shape, module.bias.dtype))
         elif isinstance(module, mint.nn.Embedding):
-            module.weight.data.normal_(
-                initializer(Normal(sigma=std, mean=0.0), module.weight.shape, module.weight.dtype)
-            )
+            module.weight.set_data(initializer(Normal(sigma=std, mean=0.0), module.weight.shape, module.weight.dtype))
             if module.padding_idx is not None:
                 module.weight[module.padding_idx] = 0
 
@@ -990,7 +984,7 @@ class MBartEncoder(MBartPreTrainedModel):
         if self.supports_gradient_checkpointing and getattr(self.config, "gradient_checkpointing", False):
             self.gradient_checkpointing_enable()
 
-    def forward(
+    def construct(
         self,
         input_ids: ms.Tensor = None,
         attention_mask: Optional[ms.Tensor] = None,
@@ -1174,9 +1168,9 @@ class MBartDecoder(MBartPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    def forward(
+    def construct(
         self,
-        input_ids: ms.LongTensor = None,
+        input_ids: ms.Tensor = None,
         attention_mask: Optional[ms.Tensor] = None,
         encoder_hidden_states: Optional[ms.Tensor] = None,
         encoder_attention_mask: Optional[ms.Tensor] = None,
@@ -1463,7 +1457,7 @@ class MBartModel(MBartPreTrainedModel):
         config_class=_CONFIG_FOR_DOC,
         expected_output=_EXPECTED_OUTPUT_SHAPE,
     )
-    def forward(
+    def construct(
         self,
         input_ids: ms.Tensor = None,
         attention_mask: Optional[ms.Tensor] = None,
@@ -1591,7 +1585,7 @@ class MBartForConditionalGeneration(MBartPreTrainedModel, GenerationMixin):
     @add_start_docstrings_to_model_forward(MBART_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=Seq2SeqLMOutput, config_class=_CONFIG_FOR_DOC)
     @add_end_docstrings(MBART_GENERATION_EXAMPLE)
-    def forward(
+    def construct(
         self,
         input_ids: ms.Tensor = None,
         attention_mask: Optional[ms.Tensor] = None,
@@ -1711,8 +1705,8 @@ class MBartForSequenceClassification(MBartPreTrainedModel):
         output_type=Seq2SeqSequenceClassifierOutput,
         config_class=_CONFIG_FOR_DOC,
     )
-    # Copied from transformers.models.bart.modeling_bart.BartForSequenceClassification.forward
-    def forward(
+    # Copied from transformers.models.bart.modeling_bart.BartForSequenceClassification.construct
+    def construct(
         self,
         input_ids: ms.Tensor = None,
         attention_mask: Optional[ms.Tensor] = None,
@@ -1839,8 +1833,8 @@ class MBartForQuestionAnswering(MBartPreTrainedModel):
         output_type=Seq2SeqQuestionAnsweringModelOutput,
         config_class=_CONFIG_FOR_DOC,
     )
-    # Copied from transformers.models.bart.modeling_bart.BartForQuestionAnswering.forward
-    def forward(
+    # Copied from transformers.models.bart.modeling_bart.BartForQuestionAnswering.construct
+    def construct(
         self,
         input_ids: ms.Tensor = None,
         attention_mask: Optional[ms.Tensor] = None,
@@ -1946,7 +1940,7 @@ class MBartDecoderWrapper(MBartPreTrainedModel):
         super().__init__(config)
         self.decoder = MBartDecoder(config)
 
-    def forward(self, *args, **kwargs):
+    def construct(self, *args, **kwargs):
         return self.decoder(*args, **kwargs)
 
 
@@ -1985,7 +1979,7 @@ class MBartForCausalLM(MBartPreTrainedModel, GenerationMixin):
         return self.model.decoder
 
     @replace_return_docstrings(output_type=CausalLMOutputWithCrossAttentions, config_class=_CONFIG_FOR_DOC)
-    def forward(
+    def construct(
         self,
         input_ids: ms.Tensor = None,
         attention_mask: Optional[ms.Tensor] = None,
